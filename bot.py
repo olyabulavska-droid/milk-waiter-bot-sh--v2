@@ -8,7 +8,7 @@ from telebot import types
 # =========================
 # 1) НАЛАШТУВАННЯ
 # =========================
-TOKEN = "8367825042:AAGJrAvcFGWWdxGWjxUXi6iuF4boYD7ZJKg"
+TOKEN = "8367825042:AAGjlc9aNW9UVuY4B8O3I06LauefECR0VtU"
 
 # ТІЛЬКИ менеджери (адміни) можуть нараховувати/знімати + бачити повний рейтинг
 ADMIN_IDS = {279217370, 7003021399}  # <-- впиши ID менеджерів
