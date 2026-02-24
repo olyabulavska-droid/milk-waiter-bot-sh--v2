@@ -5,9 +5,9 @@ import telebot
 from telebot import types
 
 # ✅ ВСТАВ СВІЙ ТОКЕН (або лишай env, якщо хочеш)
-TOKEN = "ВСТАВ_ТУТ_СВІЙ_ТОКЕН"
+TOKEN = "8367825042:AAE8_ald1btNX8kQHu0UVscStrJBefx_HKM"
 
-if not TOKEN or "ВСТАВ_ТУТ" in TOKEN:
+if not TOKEN or "8367825042:AAE8_ald1btNX8kQHu0UVscStrJBefx_HKM" in TOKEN:
     raise RuntimeError("TOKEN is missing")
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
