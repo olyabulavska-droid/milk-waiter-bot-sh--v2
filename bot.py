@@ -2,7 +2,7 @@ import os
 import telebot
 from telebot import types
 
-TOKEN = os.getenv("TOKEN")
+TOKEN = os.environ.get("TOKEN")
 if not TOKEN:
     raise RuntimeError("TOKEN env var is missing")
 
