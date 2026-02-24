@@ -2,9 +2,7 @@ import os
 import telebot
 from telebot import types
 
-TOKEN = os.environ.get("TOKEN")
-if not TOKEN:
-    raise RuntimeError("TOKEN env var is missing")
+TOKEN = "8367825042:AAE8_ald1btNX8kQHu0UVscStrJBefx_HKM"
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
