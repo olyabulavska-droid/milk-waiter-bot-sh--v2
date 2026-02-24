@@ -7,7 +7,7 @@ from telebot import types
 # =========================
 # 1) НАЛАШТУВАННЯ
 # =========================
-TOKEN = "8367825042:AAE8_ald1btNX8kQHu0UVscStrJBefx_HKM"
+TOKEN = "8367825042:AAGJrAvcFGWWdxGWjxUXi6iuF4boYD7ZJKg"
 
 # ТІЛЬКИ менеджери (адміни) можуть нараховувати/знімати
 ADMIN_IDS = {279217370}  # <-- впиши своїх менеджерів (можна кілька)
