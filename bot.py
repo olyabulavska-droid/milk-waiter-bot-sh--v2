@@ -4,7 +4,6 @@ import time
 import telebot
 from telebot import types
 
-# ✅ ВСТАВ СВІЙ ТОКЕН (або лишай env, якщо хочеш)
 TOKEN = "8367825042:AAE8_ald1btNX8kQHu0UVscStrJBefx_HKM"
 
 if not TOKEN or "8367825042:AAE8_ald1btNX8kQHu0UVscStrJBefx_HKM" in TOKEN:
@@ -15,7 +14,7 @@ bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 # --- Налаштування ---
 # Адміни (менеджери). Можеш вписати свій Telegram ID (цифри).
 # Якщо не знаєш ID — тимчасово залиш пусто, тоді всі будуть мати доступ до нарахувань.
-ADMIN_IDS = set()
+ADMIN_IDS = set(279217370)
 # ADMIN_IDS = {123456789}  # приклад
 
 # Причини нарахування
