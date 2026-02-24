@@ -1,36 +1,29 @@
+import os
 import time
+import random
 import sqlite3
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-import threading
-
+from datetime import datetime, date
 import telebot
 from telebot import types
 
 # =========================
 # 1) НАЛАШТУВАННЯ
 # =========================
-TOKEN = "8367825042:AAGJrAvcFGWWdxGWjxUXi6iuF4boYD7ZJKg"  # <-- твій токен тут (як ти просила)
+TOKEN = "8367825042:AAGjlc9aNW9UVuY4B8O3I06LauefECR0VtU"  # <-- встав токен
+ADMIN_IDS = {279217370, 7003021399}  # <-- менеджери (адміни), numeric id
 
-# ТІЛЬКИ менеджери можуть нараховувати/знімати
-ADMIN_IDS = {279217370, 7003021399}  # <-- впиши своїх менеджерів
+# Куди слати повідомлення менеджерам (наприклад твій id або id групи менеджерів)
+MANAGER_CHAT_ID = 279217370
 
-# Куди слати підсумок місяця (може бути твій id або id групи)
+# Куди слати підсумок місяця (можеш той самий чат менеджерів)
 MONTHLY_ANNOUNCE_CHAT_ID = 279217370
 
-# ===== ТИЖНЕВИЙ РЕЙТИНГ =====
-WEEKLY_ANNOUNCE_CHAT_ID = 279217370  # куди слати рейтинг тижня (може бути група)
-KYIV_TZ = ZoneInfo("Europe/Kyiv")
-WEEKLY_WEEKDAY = 6   # 0=Пн ... 6=Нд
-WEEKLY_HOUR = 22     # 20:00
-WEEKLY_MINUTE = 0
-
 DB_PATH = "bot.db"
+
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
-
 # =========================
-# 2) ПРИЧИНИ (затверджені)
+# 2) ПРИЧИНИ (ЗАТВЕРДЖЕНІ)
 # =========================
 REASONS_ADD = [
     ("no_violations_week",       "✅ Відсутність порушень (тиждень)", 30),
@@ -54,9 +47,32 @@ REASONS_SUB = [
     ("rules_break",        "🚫 Порушення базових правил роботи", 5),
 ]
 
+# =========================
+# 3) MAX FUN: Daily + Box + Levels
+# =========================
+DAILY_BONUS_POINTS = 5  # щоденний бонус
+SECRET_BOX_COST = 80    # ціна боксу
+# ("назва", bonus_points, chance%, needs_manager_approval)
+SECRET_BOX = [
+    ("☕ Напійх2", 0,   25, True),
+    ("🍰 Десертх2", 0, 22, True),
+    ("🎯 +20 балів", 20, 22, False),
+    ("🍔 Страва без штату", 0, 14, True),
+    ("🚀 +40 балів", 40, 12, False),
+    ("💎 JACKPOT +120 балів", 120, 5, False),
+]
+
+# Рівні (за місячними балами)
+LEVELS = [
+    (0,   "Новачок 🥄"),
+    (30,  "Впевнений офіціант 🍽️"),
+    (80,  "Профі ⭐"),
+    (150, "Топ 🔥"),
+    (250, "Легенда 👑"),
+]
 
 # =========================
-# 3) DB
+# 4) DB
 # =========================
 def db():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -71,7 +87,10 @@ def init_db():
             username TEXT,
             points INTEGER NOT NULL DEFAULT 0,
             joined_ts INTEGER,
-            updated_ts INTEGER
+            updated_ts INTEGER,
+            last_daily_date TEXT DEFAULT '',
+            last_box_date TEXT DEFAULT '',
+            last_menu_msg_id INTEGER DEFAULT NULL
         )
     """)
     cur.execute("""
@@ -83,8 +102,7 @@ def init_db():
             target_id INTEGER,
             target_name TEXT,
             delta INTEGER,
-            reason_key TEXT,
-            reason_title TEXT
+            reason TEXT
         )
     """)
     cur.execute("""
@@ -130,6 +148,21 @@ def upsert_user(uid: int, name: str, username: str):
     con.commit()
     con.close()
 
+def get_user(uid: int):
+    con = db()
+    cur = con.cursor()
+    cur.execute("SELECT uid, name, username, points, last_daily_date, last_box_date, last_menu_msg_id FROM users WHERE uid=?", (uid,))
+    row = cur.fetchone()
+    con.close()
+    return row
+
+def set_last_menu_msg(uid: int, msg_id: int):
+    con = db()
+    cur = con.cursor()
+    cur.execute("UPDATE users SET last_menu_msg_id=? WHERE uid=?", (msg_id, uid))
+    con.commit()
+    con.close()
+
 def get_points(uid: int) -> int:
     con = db()
     cur = con.cursor()
@@ -147,6 +180,16 @@ def apply_points(uid: int, delta: int) -> int:
     row = cur.fetchone()
     con.close()
     return int(row[0]) if row else 0
+
+def log_action(admin_id, admin_name, target_id, target_name, delta, reason):
+    con = db()
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO actions(ts,admin_id,admin_name,target_id,target_name,delta,reason) VALUES(?,?,?,?,?,?,?)",
+        (int(time.time()), admin_id, admin_name, target_id, target_name, delta, reason)
+    )
+    con.commit()
+    con.close()
 
 def get_all_users_sorted(limit: int = 50):
     con = db()
@@ -171,113 +214,25 @@ def reset_points_all():
     con.commit()
     con.close()
 
-def log_action(admin_id, admin_name, target_id, target_name, delta, reason_key, reason_title):
+def set_user_daily(uid: int, d: str):
     con = db()
     cur = con.cursor()
-    cur.execute(
-        "INSERT INTO actions(ts,admin_id,admin_name,target_id,target_name,delta,reason_key,reason_title) VALUES(?,?,?,?,?,?,?,?)",
-        (int(time.time()), admin_id, admin_name, target_id, target_name, delta, reason_key, reason_title)
-    )
+    cur.execute("UPDATE users SET last_daily_date=? WHERE uid=?", (d, uid))
     con.commit()
     con.close()
 
-def get_actions_for_user(target_id: int, limit: int = 10):
+def set_user_box(uid: int, d: str):
     con = db()
     cur = con.cursor()
-    cur.execute(
-        "SELECT ts, delta, reason_title, admin_name FROM actions WHERE target_id=? ORDER BY ts DESC LIMIT ?",
-        (target_id, limit)
-    )
-    rows = cur.fetchall()
+    cur.execute("UPDATE users SET last_box_date=? WHERE uid=?", (d, uid))
+    con.commit()
     con.close()
-    return rows
-
-def get_actions_log(limit: int = 15):
-    con = db()
-    cur = con.cursor()
-    cur.execute(
-        "SELECT ts, admin_name, target_name, delta, reason_title FROM actions ORDER BY ts DESC LIMIT ?",
-        (limit,)
-    )
-    rows = cur.fetchall()
-    con.close()
-    return rows
-
-
-# =========================
-# 4) РЕЙТИНГИ
-# =========================
-def label_user(name: str, username: str, uid: int) -> str:
-    if name:
-        return name
-    if username:
-        return f"@{username}"
-    return str(uid)
-
-def get_user_rank(uid: int):
-    """
-    Повертає (rank, total, points, label)
-    """
-    con = db()
-    cur = con.cursor()
-    cur.execute("SELECT uid, name, username, points FROM users ORDER BY points DESC, updated_ts ASC")
-    rows = cur.fetchall()
-    con.close()
-
-    total = len(rows)
-    if total == 0:
-        return (0, 0, 0, "")
-
-    for i, (u, name, username, pts) in enumerate(rows, start=1):
-        if int(u) == int(uid):
-            return (i, total, int(pts or 0), label_user(name, username, u))
-
-    return (0, total, 0, "")
-
-def build_leaderboard_text(limit: int = 10) -> str:
-    rows = get_all_users_sorted(limit=limit)
-    if not rows:
-        return "Поки що немає учасників."
-
-    text = "🏆 <b>Рейтинг (ТОП)</b>\n\n"
-    for i, (u, n, un, pts) in enumerate(rows, start=1):
-        label = label_user(n, un, u)
-        medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "•"))
-        text += f"{medal} {i}. {label} — <b>{pts}</b>\n"
-    return text
-
-def build_weekly_leaderboard(days: int = 7, limit: int = 10) -> str:
-    con = db()
-    cur = con.cursor()
-    since_ts = int(time.time()) - days * 24 * 60 * 60
-
-    cur.execute("""
-        SELECT target_id, target_name, SUM(delta) as score
-        FROM actions
-        WHERE ts >= ?
-        GROUP BY target_id, target_name
-        ORDER BY score DESC
-        LIMIT ?
-    """, (since_ts, limit))
-
-    rows = cur.fetchall()
-    con.close()
-
-    if not rows:
-        return f"🏆 <b>Рейтинг тижня</b>\n\nПоки що немає дій за останні {days} днів."
-
-    text = f"🏆 <b>Рейтинг тижня</b> (останні {days} днів)\n\n"
-    for i, (_, name, score) in enumerate(rows, start=1):
-        medal = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "•"))
-        text += f"{medal} {i}. {name} — <b>{score}</b>\n"
-    return text
-
 
 # =========================
 # 5) МІСЯЧНЕ ЗАКРИТТЯ + ОБНУЛЕННЯ
 # =========================
 def current_month_key():
-    return datetime.now(KYIV_TZ).strftime("%Y-%m")
+    return datetime.now().strftime("%Y-%m")
 
 def month_reset_if_needed():
     last = meta_get("last_reset_month", "")
@@ -296,15 +251,14 @@ def announce_month_winner_and_reset(month_key: str):
         text = f"📅 <b>Підсумок місяця {month_key}</b>\n\nНемає учасників."
     else:
         winner_uid, winner_name, winner_username, winner_pts = rows[0]
-        winner_label = label_user(winner_name, winner_username, winner_uid)
+        winner_label = winner_name or (f"@{winner_username}" if winner_username else str(winner_uid))
 
         text = f"🏆 <b>Переможець місяця {month_key}</b>\n"
-        text += f"🥇 {winner_label} — <b>{winner_pts}</b> балів\n\n"
+        text += f"👑 {winner_label} — <b>{winner_pts}</b> балів\n\n"
         text += "📊 <b>Топ-10:</b>\n"
         for i, (uid, name, username, pts) in enumerate(rows, start=1):
-            label = label_user(name, username, uid)
-            mark = "🥇" if i == 1 else ("🥈" if i == 2 else ("🥉" if i == 3 else "•"))
-            text += f"{mark} {i}. {label} — <b>{pts}</b>\n"
+            label = name or (f"@{username}" if username else str(uid))
+            text += f"{i}. {label} — <b>{pts}</b>\n"
 
     try:
         bot.send_message(MONTHLY_ANNOUNCE_CHAT_ID, text)
@@ -313,61 +267,49 @@ def announce_month_winner_and_reset(month_key: str):
 
     reset_points_all()
 
-
 # =========================
-# 6) ТИЖНЕВИЙ ТРИГЕР (фон)
-# =========================
-def weekly_send_if_needed():
-    now = datetime.now(KYIV_TZ)
-
-    if now.weekday() != WEEKLY_WEEKDAY:
-        return
-    if not (now.hour == WEEKLY_HOUR and now.minute == WEEKLY_MINUTE):
-        return
-
-    week_key = now.strftime("%G-W%V")  # 2026-W08
-    last = meta_get("last_weekly_sent", "")
-    if last == week_key:
-        return
-
-    text = build_weekly_leaderboard(days=7, limit=10)
-    try:
-        bot.send_message(WEEKLY_ANNOUNCE_CHAT_ID, text)
-    except Exception:
-        pass
-
-    meta_set("last_weekly_sent", week_key)
-
-def start_weekly_worker():
-    def loop():
-        while True:
-            try:
-                weekly_send_if_needed()
-            except Exception:
-                pass
-            time.sleep(30)
-    threading.Thread(target=loop, daemon=True).start()
-
-
-# =========================
-# 7) UI
+# 6) HELPERS / UI
 # =========================
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
 
+def user_label(uid: int, name: str, username: str) -> str:
+    n = (name or "").strip()
+    u = (username or "").strip()
+    if n:
+        return n
+    if u:
+        return f"@{u}"
+    return str(uid)
+
+def normalize_name(u):
+    name = (u.full_name or "").strip()
+    username = (u.username or "").strip()
+    return name, username
+
+def get_level(points: int):
+    lvl = LEVELS[0][1]
+    next_threshold = None
+    for threshold, title in LEVELS:
+        if points >= threshold:
+            lvl = title
+        else:
+            next_threshold = threshold
+            break
+    return lvl, next_threshold
+
 def main_menu_inline(uid: int):
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("📊 Мій баланс", callback_data="act:bal"))
+    kb.add(types.InlineKeyboardButton("🏅 Мій рівень", callback_data="act:level"))
+    kb.add(types.InlineKeyboardButton("🎯 Daily bonus", callback_data="act:daily"))
+    kb.add(types.InlineKeyboardButton("🎁 Secret Box", callback_data="act:box"))
     kb.add(types.InlineKeyboardButton("🏆 Рейтинг", callback_data="act:rate"))
-    kb.add(types.InlineKeyboardButton("📜 Моя історія", callback_data="act:hist"))
-    kb.add(types.InlineKeyboardButton("📅 Рейтинг тижня", callback_data="act:weekly"))
-
     if is_admin(uid):
         kb.add(
             types.InlineKeyboardButton("➕ Нарахувати", callback_data="act:add"),
             types.InlineKeyboardButton("➖ Зняти", callback_data="act:sub"),
         )
-        kb.add(types.InlineKeyboardButton("📋 Лог дій", callback_data="act:log"))
     return kb
 
 def reasons_keyboard(mode: str):
@@ -388,7 +330,7 @@ def users_keyboard(mode: str, reason_key: str):
         return kb
 
     for uid, name, username, pts in rows:
-        label = label_user(name, username, uid)
+        label = name or (f"@{username}" if username else str(uid))
         kb.add(types.InlineKeyboardButton(f"{label} (бал: {pts})", callback_data=f"user:{mode}:{reason_key}:{uid}"))
 
     kb.add(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"back:reasons:{mode}"))
@@ -401,175 +343,252 @@ def find_reason(mode: str, reason_key: str):
             return title, pts
     return None, None
 
-# "Чистий чат": редагуємо одне повідомлення-екран
-def show_screen(chat_id: int, text: str, reply_markup=None, c=None):
-    if c and c.message:
+def safe_edit_menu(chat_id: int, uid: int, text: str):
+    """
+    Щоб чат не захаращувався — ми редагуємо одне "головне" повідомлення.
+    Якщо редагування неможливе — створюємо нове і запам'ятовуємо id.
+    """
+    u = get_user(uid)
+    last_msg_id = u[6] if u else None  # last_menu_msg_id
+    kb = main_menu_inline(uid)
+
+    if last_msg_id:
         try:
-            bot.edit_message_text(
-                text=text,
-                chat_id=chat_id,
-                message_id=c.message.message_id,
-                reply_markup=reply_markup,
-                parse_mode="HTML"
-            )
+            bot.edit_message_text(text, chat_id, last_msg_id, reply_markup=kb)
             return
         except Exception:
             pass
-    bot.send_message(chat_id, text, reply_markup=reply_markup)
 
+    m = bot.send_message(chat_id, text, reply_markup=kb)
+    try:
+        set_last_menu_msg(uid, m.message_id)
+    except Exception:
+        pass
 
 # =========================
-# 8) HANDLERS
+# 7) Рейтинг логіка
+# =========================
+def get_rank_of_user(uid: int):
+    con = db()
+    cur = con.cursor()
+    cur.execute("SELECT uid, points FROM users ORDER BY points DESC, updated_ts ASC")
+    rows = cur.fetchall()
+    con.close()
+    rank = None
+    total = len(rows)
+    pts = 0
+    for i, (u, p) in enumerate(rows, start=1):
+        if u == uid:
+            rank = i
+            pts = int(p or 0)
+            break
+    return rank, total, pts
+
+def build_top10_text():
+    rows = get_all_users_sorted(limit=10)
+    if not rows:
+        return "Поки що немає учасників."
+    text = "🏆 <b>ТОП-10</b>\n\n"
+    for i, (u, n, un, pts) in enumerate(rows, start=1):
+        label = n or (f"@{un}" if un else str(u))
+        text += f"{i}. {label} — <b>{pts}</b>\n"
+    return text
+
+# =========================
+# 8) Daily bonus + Secret box (max)
+# =========================
+def today_str():
+    return date.today().isoformat()
+
+def open_secret_box(uid: int, chat_id: int, manager_label: str):
+    row = get_user(uid)
+    points = int(row[3]) if row else 0
+    last_box = (row[5] or "") if row else ""
+
+    if last_box == today_str():
+        bot.send_message(chat_id, "🎁 Ти вже відкривав(ла) Secret Box сьогодні.\nСпробуй завтра 😉")
+        return
+
+    if points < SECRET_BOX_COST:
+        bot.send_message(chat_id, f"❌ Потрібно <b>{SECRET_BOX_COST}</b> балів.\nУ тебе: <b>{points}</b>")
+        return
+
+    # списали
+    apply_points(uid, -SECRET_BOX_COST)
+    set_user_box(uid, today_str())
+
+    # “анімація”
+    msg = bot.send_message(chat_id, "🎁 Відкриваю бокс…")
+    time.sleep(1.1)
+
+    r = random.randint(1, 100)
+    s = 0
+    prize = None
+    for name, bonus, chance, needs_manager in SECRET_BOX:
+        s += chance
+        if r <= s:
+            prize = (name, bonus, needs_manager)
+            break
+    if not prize:
+        prize = ("🎯 +10 балів", 10, False)
+
+    name, bonus, needs_manager = prize
+
+    if bonus > 0:
+        newbal = apply_points(uid, bonus)
+        bot.edit_message_text(
+            f"🎉 <b>Бокс відкрито!</b>\n\n🏆 Виграш: <b>{name}</b>\n📊 Баланс: <b>{newbal}</b>",
+            chat_id, msg.message_id
+        )
+        return
+
+    # приз “фізичний” → просимо менеджера видати
+    bot.edit_message_text(
+        f"🎉 <b>Бокс відкрито!</b>\n\n🏆 Виграш: <b>{name}</b>\n\n✅ Я повідомив менеджера. Забереш у нього 🙂",
+        chat_id, msg.message_id
+    )
+    try:
+        bot.send_message(
+            MANAGER_CHAT_ID,
+            f"🎁 <b>Secret Box</b>\n"
+            f"👤 Офіціант: <b>{manager_label}</b>\n"
+            f"🏆 Виграш: <b>{name}</b>\n"
+            f"📌 Видай нагороду вручну."
+        )
+    except Exception:
+        pass
+
+def take_daily_bonus(uid: int, chat_id: int):
+    row = get_user(uid)
+    last_daily = (row[4] or "") if row else ""
+    if last_daily == today_str():
+        bot.send_message(chat_id, "🎯 Daily bonus вже забраний сьогодні. Спробуй завтра 🙂")
+        return
+    set_user_daily(uid, today_str())
+    newbal = apply_points(uid, DAILY_BONUS_POINTS)
+    bot.send_message(chat_id, f"🎯 +<b>{DAILY_BONUS_POINTS}</b> балів!\n📊 Баланс: <b>{newbal}</b>")
+
+# =========================
+# 9) HANDLERS
 # =========================
 init_db()
-start_weekly_worker()
 
 @bot.message_handler(commands=["start"])
 def start(m):
-    # /start не чіпаємо: просто відкриває меню
     month_reset_if_needed()
     uid = m.from_user.id
-    name = (m.from_user.full_name or "").strip()
-    username = (m.from_user.username or "").strip()
+    name, username = normalize_name(m.from_user)
     upsert_user(uid, name, username)
-    bot.send_message(m.chat.id, "Меню ✅", reply_markup=main_menu_inline(uid))
-
-@bot.message_handler(func=lambda m: True, content_types=["text"])
-def ignore_spam(m):
-    # Ігноруємо будь-які тексти, щоб ніхто не засмічував бот
-    # (всі дії тільки через кнопки + /start)
-    return
+    safe_edit_menu(m.chat.id, uid, "Меню ✅")
 
 @bot.callback_query_handler(func=lambda c: True)
 def cb(c):
     month_reset_if_needed()
 
     uid = c.from_user.id
-    name = (c.from_user.full_name or "").strip()
-    username = (c.from_user.username or "").strip()
+    name, username = normalize_name(c.from_user)
     upsert_user(uid, name, username)
+    label = user_label(uid, name, username)
 
     data = c.data or ""
 
-    # прибрати loading
+    # прибрати “Loading…”
     try:
-        bot.answer_callback_query(c.id)
+        bot.answer_callback_query(c.id, "Ок")
     except Exception:
         pass
-
-    if not c.message:
-        return
-    chat_id = c.message.chat.id
 
     if data == "noop":
         return
 
+    # BACK
     if data == "back:menu":
-        show_screen(chat_id, "Меню ✅", reply_markup=main_menu_inline(uid), c=c)
+        safe_edit_menu(c.message.chat.id, uid, "Меню ✅")
         return
 
-    # ===== Баланс =====
+    if data.startswith("back:reasons:"):
+        mode = data.split(":")[2]
+        bot.edit_message_text(
+            "Обери причину:",
+            c.message.chat.id,
+            c.message.message_id,
+            reply_markup=reasons_keyboard(mode)
+        )
+        return
+
+    # MENU ACTIONS
     if data == "act:bal":
         p = get_points(uid)
-        show_screen(chat_id, f"📊 Твій баланс: <b>{p}</b> балів", reply_markup=main_menu_inline(uid), c=c)
+        bot.send_message(c.message.chat.id, f"📊 Твій баланс: <b>{p}</b> балів")
         return
 
-    # ===== Рейтинг (офіціант: тільки своє місце / менеджер: ТОП) =====
+    if data == "act:level":
+        p = get_points(uid)
+        lvl, nxt = get_level(p)
+        if nxt is None:
+            bot.send_message(c.message.chat.id, f"👑 Твій рівень: <b>{lvl}</b>\n🔥 Ти на максимумі!")
+        else:
+            bot.send_message(c.message.chat.id, f"🏅 Твій рівень: <b>{lvl}</b>\nДо наступного: <b>{nxt - p}</b> балів")
+        return
+
+    if data == "act:daily":
+        take_daily_bonus(uid, c.message.chat.id)
+        return
+
+    if data == "act:box":
+        open_secret_box(uid, c.message.chat.id, label)
+        return
+
     if data == "act:rate":
         if is_admin(uid):
-            show_screen(chat_id, build_leaderboard_text(limit=10), reply_markup=main_menu_inline(uid), c=c)
-            return
-
-        rank, total, pts, label = get_user_rank(uid)
-        if total == 0 or rank == 0:
-            show_screen(chat_id, "Поки що немає рейтингу. Натисни /start 😊", reply_markup=main_menu_inline(uid), c=c)
-            return
-
-        text = (
-            "🏆 <b>Твоє місце в рейтингу</b>\n\n"
-            f"👤 {label}\n"
-            f"📍 Місце: <b>{rank}</b> з <b>{total}</b>\n"
-            f"⭐ Бали: <b>{pts}</b>"
-        )
-        show_screen(chat_id, text, reply_markup=main_menu_inline(uid), c=c)
+            bot.send_message(c.message.chat.id, build_top10_text())
+        else:
+            rank, total, pts = get_rank_of_user(uid)
+            if rank is None:
+                bot.send_message(c.message.chat.id, "Поки що тебе немає в рейтингу. Натисни /start 🙂")
+            else:
+                bot.send_message(
+                    c.message.chat.id,
+                    f"🏆 <b>Твоє місце:</b> {rank} з {total}\n📊 Бали: <b>{pts}</b>"
+                )
         return
 
-    # ===== Рейтинг тижня (видно всім) =====
-    if data == "act:weekly":
-        text = build_weekly_leaderboard(days=7, limit=10)
-        show_screen(chat_id, text, reply_markup=main_menu_inline(uid), c=c)
-        return
-
-    # ===== Історія офіціанта =====
-    if data == "act:hist":
-        rows = get_actions_for_user(uid, limit=10)
-        if not rows:
-            show_screen(chat_id, "📜 Поки що немає дій по тобі.", reply_markup=main_menu_inline(uid), c=c)
-            return
-        text = "📜 <b>Моя історія (останні 10)</b>\n\n"
-        for ts, delta, reason_title, admin_name in rows:
-            dt = datetime.fromtimestamp(ts, KYIV_TZ).strftime("%d.%m %H:%M")
-            sign = "➕" if delta > 0 else "➖"
-            text += f"{dt}  {sign} <b>{abs(delta)}</b> — {reason_title}\n<i>Менеджер: {admin_name}</i>\n\n"
-        show_screen(chat_id, text.strip(), reply_markup=main_menu_inline(uid), c=c)
-        return
-
-    # ===== Лог дій (для менеджера) =====
-    if data == "act:log":
-        if not is_admin(uid):
-            show_screen(chat_id, "⛔ Доступ лише для менеджерів.", reply_markup=main_menu_inline(uid), c=c)
-            return
-        rows = get_actions_log(limit=15)
-        if not rows:
-            show_screen(chat_id, "📋 Лог порожній.", reply_markup=main_menu_inline(uid), c=c)
-            return
-        text = "📋 <b>Останні дії</b>\n\n"
-        for ts, admin_name, target_name, delta, reason_title in rows:
-            dt = datetime.fromtimestamp(ts, KYIV_TZ).strftime("%d.%m %H:%M")
-            sign = "➕" if delta > 0 else "➖"
-            text += f"{dt}  {admin_name} → {target_name}\n{sign} <b>{abs(delta)}</b> — {reason_title}\n\n"
-        show_screen(chat_id, text.strip(), reply_markup=main_menu_inline(uid), c=c)
-        return
-
-    # ===== Нарахувати / Зняти =====
     if data == "act:add":
         if not is_admin(uid):
-            show_screen(chat_id, "⛔ Тільки менеджери можуть нараховувати.", reply_markup=main_menu_inline(uid), c=c)
+            bot.send_message(c.message.chat.id, "⛔ Тільки менеджери можуть нараховувати.")
             return
-        show_screen(chat_id, "➕ Обери причину нарахування:", reply_markup=reasons_keyboard("add"), c=c)
+        bot.send_message(c.message.chat.id, "➕ Обери причину нарахування:", reply_markup=reasons_keyboard("add"))
         return
 
     if data == "act:sub":
         if not is_admin(uid):
-            show_screen(chat_id, "⛔ Тільки менеджери можуть знімати.", reply_markup=main_menu_inline(uid), c=c)
+            bot.send_message(c.message.chat.id, "⛔ Тільки менеджери можуть знімати.")
             return
-        show_screen(chat_id, "➖ Обери причину списання:", reply_markup=reasons_keyboard("sub"), c=c)
+        bot.send_message(c.message.chat.id, "➖ Обери причину списання:", reply_markup=reasons_keyboard("sub"))
         return
 
-    # ===== Вибір причини =====
+    # REASONS
     if data.startswith("reason:"):
         if not is_admin(uid):
-            show_screen(chat_id, "⛔ Нема доступу.", reply_markup=main_menu_inline(uid), c=c)
+            bot.send_message(c.message.chat.id, "⛔ Нема доступу.")
             return
-
         _, mode, reason_key = data.split(":", 2)
         title, pts = find_reason(mode, reason_key)
         if title is None:
-            show_screen(chat_id, "Не знайдено причину.", reply_markup=main_menu_inline(uid), c=c)
+            bot.send_message(c.message.chat.id, "Не знайдено причину.")
             return
 
-        show_screen(
-            chat_id,
-            f"Кому {'нарахувати' if mode=='add' else 'зняти'} <b>{pts}</b> за:\n<i>{title}</i> ?",
-            reply_markup=users_keyboard(mode, reason_key),
-            c=c
+        bot.send_message(
+            c.message.chat.id,
+            f"Кому {'нарахувати' if mode=='add' else 'зняти'} <b>{pts}</b> за:\n<i>{title}</i>?",
+            reply_markup=users_keyboard(mode, reason_key)
         )
         return
 
-    # ===== Вибір офіціанта =====
+    # PICK USER
     if data.startswith("user:"):
         if not is_admin(uid):
-            show_screen(chat_id, "⛔ Нема доступу.", reply_markup=main_menu_inline(uid), c=c)
+            bot.send_message(c.message.chat.id, "⛔ Нема доступу.")
             return
 
         _, mode, reason_key, target_uid_str = data.split(":", 3)
@@ -577,24 +596,21 @@ def cb(c):
 
         title, pts = find_reason(mode, reason_key)
         if title is None:
-            show_screen(chat_id, "Не знайдено причину.", reply_markup=main_menu_inline(uid), c=c)
+            bot.send_message(c.message.chat.id, "Не знайдено причину.")
             return
 
         delta = pts if mode == "add" else -pts
         new_balance = apply_points(target_uid, delta)
 
-        manager_label = label_user(name, username, uid)
+        manager_label = label
+        target_row = get_user(target_uid)
+        t_name = target_row[1] if target_row else ""
+        t_user = target_row[2] if target_row else ""
+        target_label = user_label(target_uid, t_name, t_user)
 
-        # ім'я цільового
-        target_label = str(target_uid)
-        for (u, n, un, _) in get_all_users_sorted(limit=300):
-            if int(u) == int(target_uid):
-                target_label = label_user(n, un, u)
-                break
+        log_action(uid, manager_label, target_uid, target_label, delta, title)
 
-        log_action(uid, manager_label, target_uid, target_label, delta, reason_key, title)
-
-        # повідомлення офіціанту (працює, якщо він натискав /start)
+        # Повідомлення офіціанту (працює тільки якщо він натиснув /start колись)
         try:
             if delta > 0:
                 msg_staff = (
@@ -616,27 +632,18 @@ def cb(c):
         except Exception:
             pass
 
-        show_screen(
-            chat_id,
-            f"✅ <b>Готово</b>\n\n"
+        bot.send_message(
+            c.message.chat.id,
+            f"✅ Готово\n"
             f"👤 {target_label}\n"
-            f"{'➕' if delta>0 else '➖'} <b>{abs(delta)}</b>\n"
+            f"Δ <b>{delta}</b>\n"
             f"📝 <i>{title}</i>\n"
-            f"📊 Новий баланс: <b>{new_balance}</b>",
-            reply_markup=main_menu_inline(uid),
-            c=c
+            f"📊 Баланс: <b>{new_balance}</b>"
         )
         return
 
-    # ===== Back до причин =====
-    if data.startswith("back:reasons:"):
-        mode = data.split(":")[-1]
-        show_screen(chat_id, "Обери причину:", reply_markup=reasons_keyboard(mode), c=c)
-        return
-
-    # fallback
-    show_screen(chat_id, "Меню ✅", reply_markup=main_menu_inline(uid), c=c)
-
-
+# =========================
+# 10) RUN
+# =========================
 print("BOT STARTED")
 bot.infinity_polling()
