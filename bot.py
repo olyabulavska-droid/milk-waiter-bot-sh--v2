@@ -4,7 +4,7 @@ from telebot import types
 
 TOKEN = os.environ.get("TOKEN")
 if not TOKEN:
-    raise RuntimeError("TOKEN env var is missing")
+    raise RuntimeError("TOKEN")
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
