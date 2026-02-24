@@ -10,25 +10,21 @@ from telebot import types
 # =========================
 TOKEN = "8367825042:AAGjlc9aNW9UVuY4B8O3I06LauefECR0VtU"
 
-# ТІЛЬКИ менеджери (адміни) можуть нараховувати/знімати + бачити повний рейтинг
-ADMIN_IDS = {279217370, 7003021399}  # <-- впиши ID менеджерів
-
-# Куди слати підсумок місяця (можеш лишити свій ID або зробити id групи)
+ADMIN_IDS = {279217370, 7003021399}
 MONTHLY_ANNOUNCE_CHAT_ID = 279217370
 
 DB_PATH = "bot.db"
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
 # =========================
-# 2) ПРИЧИНИ (затверджені)
+# 2) ПРИЧИНИ
 # =========================
 REASONS_ADD = [
     ("no_violations_week",       "✅ Відсутність порушень (тиждень)", 30),
     ("no_late_week",             "⏰ Відсутність запізнень (тиждень)", 30),
-    ("positive_review",          "🙂 Позитивний відгук", 2),
-    ("super_review",             "🔥 Супер позитивний відгук", 5),
+    ("positive_review",          "🙂 Позитивний відгук", 5),
+    ("super_review",             "🔥 Супер позитивний відгук", 10),
     ("toplist_sale",             "🏆 Продаж топ листа", 5),
-
     ("look_standard",            "👔 Стандарт зовнішнього вигляду", 10),
     ("menu_knowledge",           "📋 Знання позиції меню", 5),
     ("manager_task",             "✅ Виконання доручення менеджера", 10),
@@ -51,11 +47,9 @@ BOX_KEY = "secret_box_50"
 BOX_TITLE = "🎁 Секретний бокс"
 BOX_PRICE = 50
 
-# Призи (відредагуй під себе)
 BOX_REWARDS = [
-    # (назва, вага/ймовірність)
-    ("🥤 Безкоштовний напій", 20),
-    ("🍰 Десерт ", 15),
+    ("🥤 Напійх2", 20),
+    ("🍰 Десертх2", 15),
     ("🍕 Страва без штату", 15),
     ("💎 +20 балів бонусом", 10),
     ("💎 +40 балів бонусом", 5),
@@ -88,6 +82,7 @@ def init_db():
             v TEXT
         )
     """)
+    # ключ: screen:<chat_id>:<uid> => message_id
     con.commit()
     con.close()
 
@@ -288,30 +283,62 @@ def pick_reward():
     weights = [r[1] for r in BOX_REWARDS]
     return random.choices(names, weights=weights, k=1)[0]
 
-def open_box_effect(chat_id: int):
-    """
-    Комбо: "анімація" (імітація прогресом) + конфеті + результат
-    """
-    msg = bot.send_message(chat_id, "🔒 <b>Починаємо відкривати бокс...</b>\n\n⏳ [          ]")
-    mid = msg.message_id
+# =========================
+# 5.1) "ОДИН ЕКРАН" (редагуємо одне повідомлення)
+# =========================
+def screen_key(chat_id: int, uid: int) -> str:
+    return f"screen:{chat_id}:{uid}"
 
-    steps = [
+def get_screen_message_id(chat_id: int, uid: int):
+    v = meta_get(screen_key(chat_id, uid), "")
+    return int(v) if v.isdigit() else None
+
+def set_screen_message_id(chat_id: int, uid: int, mid: int):
+    meta_set(screen_key(chat_id, uid), str(mid))
+
+def render(chat_id: int, uid: int, text: str, reply_markup=None):
+    """
+    Показує "екран" в одному повідомленні:
+    - якщо message_id є -> edit
+    - якщо нема/не вдалось -> send і зберегти
+    """
+    mid = get_screen_message_id(chat_id, uid)
+    if mid:
+        try:
+            bot.edit_message_text(text, chat_id, mid, reply_markup=reply_markup)
+            return
+        except Exception:
+            # якщо старе повідомлення не редагується (видалили, дуже старе тощо) -> створимо нове
+            pass
+
+    msg = bot.send_message(chat_id, text, reply_markup=reply_markup)
+    set_screen_message_id(chat_id, uid, msg.message_id)
+
+def animate_box_open_on_screen(chat_id: int, uid: int):
+    """
+    Анімація + конфеті у тому ж "екрані" через edit_message_text.
+    """
+    mid = get_screen_message_id(chat_id, uid)
+    if not mid:
+        # на всяк випадок
+        render(chat_id, uid, "🔒 <b>Починаємо відкривати бокс...</b>\n\n⏳ [          ]")
+        mid = get_screen_message_id(chat_id, uid)
+
+    frames = [
+        "🔒 <b>Починаємо відкривати бокс...</b>\n\n⏳ [          ]",
         "🔓 <b>Підбираю ключ...</b>\n\n⏳ [██        ]",
         "🎁 <b>Бокс тремтить...</b>\n\n⏳ [█████     ]",
         "✨ <b>Майже!</b>\n\n⏳ [████████  ]",
         "💥 <b>ВІДКРИТО!</b>\n\n⏳ [██████████]",
+        "🎉🎉🎉🎉🎉\n✨🎊✨🎊✨🎊✨\n🎉🎉🎉🎉🎉\n\n<b>Рахую результат...</b>",
     ]
-    for s in steps:
-        time.sleep(0.7)
+    for f in frames:
+        time.sleep(0.6)
         try:
-            bot.edit_message_text(s, chat_id, mid)
+            bot.edit_message_text(f, chat_id, mid)
         except Exception:
+            # якщо раптом не редагується — не валимо бот
             pass
-
-    # "конфеті"
-    time.sleep(0.3)
-    bot.send_message(chat_id, "🎉🎉🎉🎉🎉\n✨🎊✨🎊✨🎊✨\n🎉🎉🎉🎉🎉")
-    time.sleep(0.3)
 
 # =========================
 # 6) HANDLERS
@@ -328,7 +355,8 @@ def start(m):
 
     upsert_user(uid, name, username)
 
-    bot.send_message(m.chat.id, "Меню ✅", reply_markup=main_menu_inline(uid))
+    # ВАЖЛИВО: тепер меню показується в одному "екрані"
+    render(m.chat.id, uid, "Меню ✅", reply_markup=main_menu_inline(uid))
 
 @bot.callback_query_handler(func=lambda c: True)
 def cb(c):
@@ -341,26 +369,27 @@ def cb(c):
 
     data = c.data or ""
 
-    # прибрати "loading"
     try:
-        bot.answer_callback_query(c.id, "Ок")
+        bot.answer_callback_query(c.id)
     except Exception:
         pass
 
     if data == "noop":
         return
 
+    chat_id = c.message.chat.id
+
     # ====== БАЛАНС ======
     if data == "act:bal":
         p = get_points(uid)
-        bot.send_message(c.message.chat.id, f"📊 Твій баланс: <b>{p}</b> балів", reply_markup=main_menu_inline(uid))
+        render(chat_id, uid, f"📊 Твій баланс: <b>{p}</b> балів", reply_markup=main_menu_inline(uid))
         return
 
-    # ====== РЕЙТИНГ: офіціант бачить лише своє місце, адмін — весь список ======
+    # ====== РЕЙТИНГ ======
     if data == "act:rate":
         rows = get_all_users_sorted(limit=200)
         if not rows:
-            bot.send_message(c.message.chat.id, "Поки що немає учасників.", reply_markup=main_menu_inline(uid))
+            render(chat_id, uid, "Поки що немає учасників.", reply_markup=main_menu_inline(uid))
             return
 
         if is_admin(uid):
@@ -368,24 +397,22 @@ def cb(c):
             for i, (u, n, un, pts) in enumerate(rows, start=1):
                 label = n or (f"@{un}" if un else str(u))
                 text += f"{i}. {label} — <b>{pts}</b>\n"
-            bot.send_message(c.message.chat.id, text, reply_markup=main_menu_inline(uid))
+            render(chat_id, uid, text, reply_markup=main_menu_inline(uid))
             return
 
-        # не адмін: показуємо лише місце + сусідів
         idx = None
         for i, (u, n, un, pts) in enumerate(rows):
             if u == uid:
                 idx = i
                 break
         if idx is None:
-            bot.send_message(c.message.chat.id, "Тебе ще нема в рейтингу. Натисни /start.", reply_markup=main_menu_inline(uid))
+            render(chat_id, uid, "Тебе ще нема в рейтингу. Натисни /start.", reply_markup=main_menu_inline(uid))
             return
 
         my_pts = rows[idx][3]
         my_place = idx + 1
         total = len(rows)
 
-        # покажемо 1 рядок вище і 1 нижче (якщо є)
         around = []
         for j in [idx - 1, idx, idx + 1]:
             if 0 <= j < total:
@@ -400,35 +427,105 @@ def cb(c):
             f"Твої бали: <b>{my_pts}</b>\n\n"
             + "\n".join(around)
         )
-        bot.send_message(c.message.chat.id, text, reply_markup=main_menu_inline(uid))
+        render(chat_id, uid, text, reply_markup=main_menu_inline(uid))
         return
 
-    # ====== МЕНЮ АДМІНА: НАРАХУВАТИ / ЗНЯТИ ======
+    # ====== МАГАЗИН ======
+    if data == "act:shop":
+        render(
+            chat_id, uid,
+            f"🛍 <b>Магазин</b>\n\nДоступно:\n{BOX_TITLE} — <b>{BOX_PRICE}</b> балів",
+            reply_markup=shop_kb()
+        )
+        return
+
+    if data.startswith("shop:buy:"):
+        item_key = data.split(":", 2)[2]
+        if item_key != BOX_KEY:
+            render(chat_id, uid, "Товар не знайдено.", reply_markup=main_menu_inline(uid))
+            return
+
+        p = get_points(uid)
+        warn = (
+            f"⚠️ <b>Підтвердження покупки</b>\n\n"
+            f"Товар: {BOX_TITLE}\n"
+            f"Ціна: <b>{BOX_PRICE}</b> балів\n"
+            f"Твій баланс: <b>{p}</b> балів\n\n"
+            f"Точно купуєш?"
+        )
+        render(chat_id, uid, warn, reply_markup=confirm_buy_kb(item_key))
+        return
+
+    if data == "shop:cancel":
+        render(chat_id, uid, "Скасовано ✅", reply_markup=main_menu_inline(uid))
+        return
+
+    if data.startswith("shop:confirm:"):
+        item_key = data.split(":", 2)[2]
+        if item_key != BOX_KEY:
+            render(chat_id, uid, "Товар не знайдено.", reply_markup=main_menu_inline(uid))
+            return
+
+        p = get_points(uid)
+        if p < BOX_PRICE:
+            render(
+                chat_id, uid,
+                f"❌ Недостатньо балів.\nПотрібно: <b>{BOX_PRICE}</b>\nУ тебе: <b>{p}</b>",
+                reply_markup=main_menu_inline(uid)
+            )
+            return
+
+        # списуємо 50
+        new_balance = apply_points(uid, -BOX_PRICE)
+
+        # анімація + конфеті в тому ж повідомленні
+        animate_box_open_on_screen(chat_id, uid)
+
+        reward = pick_reward()
+
+        bonus = 0
+        if reward == "💎 +10 балів бонусом":
+            bonus = 10
+        elif reward == "💎 +20 балів бонусом":
+            bonus = 20
+
+        if bonus:
+            new_balance = apply_points(uid, bonus)
+
+        result_text = (
+            f"🎁 <b>{BOX_TITLE} відкрито!</b>\n\n"
+            f"✨ Тобі випало: <b>{reward}</b>\n\n"
+            f"📊 Баланс зараз: <b>{new_balance}</b> балів"
+        )
+        render(chat_id, uid, result_text, reply_markup=main_menu_inline(uid))
+        return
+
+    # ====== АДМІН: НАРАХУВАТИ / ЗНЯТИ ======
     if data == "act:add":
         if not is_admin(uid):
-            bot.send_message(c.message.chat.id, "⛔ Тільки менеджери можуть нараховувати.")
+            render(chat_id, uid, "⛔ Тільки менеджери можуть нараховувати.", reply_markup=main_menu_inline(uid))
             return
-        bot.send_message(c.message.chat.id, "➕ Обери причину нарахування:", reply_markup=reasons_keyboard("add"))
+        render(chat_id, uid, "➕ Обери причину нарахування:", reply_markup=reasons_keyboard("add"))
         return
 
     if data == "act:sub":
         if not is_admin(uid):
-            bot.send_message(c.message.chat.id, "⛔ Тільки менеджери можуть знімати.")
+            render(chat_id, uid, "⛔ Тільки менеджери можуть знімати.", reply_markup=main_menu_inline(uid))
             return
-        bot.send_message(c.message.chat.id, "➖ Обери причину списання:", reply_markup=reasons_keyboard("sub"))
+        render(chat_id, uid, "➖ Обери причину списання:", reply_markup=reasons_keyboard("sub"))
         return
 
     if data.startswith("reason:"):
         if not is_admin(uid):
-            bot.send_message(c.message.chat.id, "⛔ Нема доступу.")
+            render(chat_id, uid, "⛔ Нема доступу.", reply_markup=main_menu_inline(uid))
             return
         _, mode, reason_key = data.split(":", 2)
         title, pts = find_reason(mode, reason_key)
         if title is None:
-            bot.send_message(c.message.chat.id, "Не знайдено причину.")
+            render(chat_id, uid, "Не знайдено причину.", reply_markup=main_menu_inline(uid))
             return
-        bot.send_message(
-            c.message.chat.id,
+        render(
+            chat_id, uid,
             f"Кому {'нарахувати' if mode=='add' else 'зняти'} <b>{pts}</b> за:\n<i>{title}</i>?",
             reply_markup=users_keyboard(mode, reason_key)
         )
@@ -436,14 +533,15 @@ def cb(c):
 
     if data.startswith("user:"):
         if not is_admin(uid):
-            bot.send_message(c.message.chat.id, "⛔ Нема доступу.")
+            render(chat_id, uid, "⛔ Нема доступу.", reply_markup=main_menu_inline(uid))
             return
+
         _, mode, reason_key, target_uid_str = data.split(":", 3)
         target_uid = int(target_uid_str)
 
         title, pts = find_reason(mode, reason_key)
         if title is None:
-            bot.send_message(c.message.chat.id, "Не знайдено причину.")
+            render(chat_id, uid, "Не знайдено причину.", reply_markup=main_menu_inline(uid))
             return
 
         delta = pts if mode == "add" else -pts
@@ -451,6 +549,7 @@ def cb(c):
 
         manager_label = name or (f"@{username}" if username else str(uid))
 
+        # повідомлення офіціанту (окремо, це нормально)
         try:
             if mode == "add":
                 msg_staff = (
@@ -472,94 +571,22 @@ def cb(c):
         except Exception:
             pass
 
-        bot.send_message(
-            c.message.chat.id,
+        render(
+            chat_id, uid,
             f"Готово ✅\nЗміна: <b>{delta}</b>\nПричина: <i>{title}</i>\nНовий баланс: <b>{new_balance}</b>",
             reply_markup=main_menu_inline(uid)
         )
-        return
-
-    # ====== МАГАЗИН (1 бокс за 80) + підтвердження + ефекти ======
-    if data == "act:shop":
-        bot.send_message(
-            c.message.chat.id,
-            f"🛍 <b>Магазин</b>\n\nДоступно:\n{BOX_TITLE} — <b>{BOX_PRICE}</b> балів",
-            reply_markup=shop_kb()
-        )
-        return
-
-    if data.startswith("shop:buy:"):
-        item_key = data.split(":", 2)[2]
-        if item_key != BOX_KEY:
-            bot.send_message(c.message.chat.id, "Товар не знайдено.", reply_markup=main_menu_inline(uid))
-            return
-
-        p = get_points(uid)
-        warn = (
-            f"⚠️ <b>Підтвердження покупки</b>\n\n"
-            f"Товар: {BOX_TITLE}\n"
-            f"Ціна: <b>{BOX_PRICE}</b> балів\n"
-            f"Твій баланс: <b>{p}</b> балів\n\n"
-            f"Точно купуєш?"
-        )
-        bot.send_message(c.message.chat.id, warn, reply_markup=confirm_buy_kb(item_key))
-        return
-
-    if data == "shop:cancel":
-        bot.send_message(c.message.chat.id, "Скасовано ✅", reply_markup=main_menu_inline(uid))
-        return
-
-    if data.startswith("shop:confirm:"):
-        item_key = data.split(":", 2)[2]
-        if item_key != BOX_KEY:
-            bot.send_message(c.message.chat.id, "Товар не знайдено.", reply_markup=main_menu_inline(uid))
-            return
-
-        p = get_points(uid)
-        if p < BOX_PRICE:
-            bot.send_message(
-                c.message.chat.id,
-                f"❌ Недостатньо балів.\nПотрібно: <b>{BOX_PRICE}</b>\nУ тебе: <b>{p}</b>",
-                reply_markup=main_menu_inline(uid)
-            )
-            return
-
-        # списуємо 80
-        new_balance = apply_points(uid, -BOX_PRICE)
-
-        # ефект відкриття (анімація-прогрес + конфеті)
-        open_box_effect(c.message.chat.id)
-
-        # результат
-        reward = pick_reward()
-
-        # якщо виграв бонус-бали — додаємо
-        bonus = 0
-        if reward == "💎 +10 балів бонусом":
-            bonus = 10
-        elif reward == "💎 +20 балів бонусом":
-            bonus = 20
-
-        if bonus:
-            new_balance = apply_points(uid, bonus)
-
-        result_text = (
-            f"🎁 <b>{BOX_TITLE} відкрито!</b>\n\n"
-            f"✨ Тобі випало: <b>{reward}</b>\n\n"
-            f"📊 Баланс зараз: <b>{new_balance}</b> балів"
-        )
-        bot.send_message(c.message.chat.id, result_text, reply_markup=main_menu_inline(uid))
         return
 
     # ====== BACK ======
     if data.startswith("back:"):
         parts = data.split(":")
         if parts[1] == "menu":
-            bot.send_message(c.message.chat.id, "Меню ✅", reply_markup=main_menu_inline(uid))
+            render(chat_id, uid, "Меню ✅", reply_markup=main_menu_inline(uid))
             return
         if parts[1] == "reasons":
             mode = parts[2]
-            bot.send_message(c.message.chat.id, "Обери причину:", reply_markup=reasons_keyboard(mode))
+            render(chat_id, uid, "Обери причину:", reply_markup=reasons_keyboard(mode))
             return
 
 # Запуск
